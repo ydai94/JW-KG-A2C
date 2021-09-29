@@ -3,6 +3,7 @@ import redis
 import numpy as np
 from representations import StateAction
 import random
+from textworld.core import EnvInfos
 
 GraphInfo = collections.namedtuple('GraphInfo', 'objs, ob_rep, act_rep, graph_state, graph_state_rep, admissible_actions, admissible_actions_rep')
 
@@ -145,6 +146,10 @@ def _load_bindings_from_tw(state, story_file, seed):
     bindings = {}
     g1 = [re.sub('{.*?}', 'OBJ', s) for s in state.command_templates]
     g = list(set([re.sub('go .*', 'go OBJ', s) for s in g1]))
+    g.remove('drop OBJ')
+    g.remove('examine OBJ')
+    g.remove('inventory')
+    g.remove('look')
     bindings['grammar'] = ';'.join(g)
     bindings['max_word_length'] = len(max(state.verbs + state.entities, key=len))
     bindings['minimal_actions'] = '/'.join(state['extra.walkthrough'])
@@ -156,34 +161,32 @@ def _load_bindings_from_tw(state, story_file, seed):
 
 
 class JeriWorld:
-    def __init__(self, story_file, seed=None):
-        self._env = textworld.start(story_file)
+    def __init__(self, story_file, seed=None, style='jericho', infos = None):
+        self._env = textworld.start(story_file, infos=infos)
         state = self._env.reset()
         self.tw_games = True
         self._seed = seed
-        self.gp = None
-        self.in7 = None
+        self.bindings = None
         if state.command_templates is None:
             self.tw_games = False
             del self._env
             self._env = jericho.FrotzEnv(story_file, seed)
             self.bindings = self._env.bindings
             self._world_changed = self._env._world_changed
+            self.act_gen = self._env.act_gen
         else:
             self.bindings = _load_bindings_from_tw(state, story_file, seed)
             self._world_changed = self._env._jericho._world_changed
-        self.act_gen = TemplateActionGeneratorJeri(self.bindings)
-        self.seed(seed)
+            self.act_gen = TemplateActionGeneratorJeri(self.bindings)
+            self.seed(seed)
 
     def __del__(self):
-        self._env.__del__()
+        del self._env
     
     def reset(self):
         if self.tw_games:
             state = self._env.reset()
-            self.gp = GameProgression(state.game)
-            self.in7 = Inform7Game(state.game)
-            raw = re.split('-=.*?=-', state.raw)[1]
+            raw = state['description']
             return raw, {'moves':state.moves, 'score':state.score}
         return self._env.reset()
     
@@ -195,15 +198,10 @@ class JeriWorld:
             old_score = self._env.state.score
             next_state = self._env.step(action)[0]
             s_action = re.sub(r'\s+', ' ', action.strip())
-            try:
-                idx = self.in7.gen_commands_from_actions(self.gp.valid_actions).index(s_action)
-                self.gp.update(self.gp.valid_actions[idx])
-            except:
-                pass
             score = self._env.state.score
             reward = score - old_score
             self._world_changed = self._env._jericho._world_changed
-            return next_state.raw, reward, (next_state.lost or next_state.won),\
+            return next_state.description, reward, (next_state.lost or next_state.won),\
               {'moves':next_state.moves, 'score':next_state.score}
         else:
             self._world_changed = self._env._world_changed
@@ -266,10 +264,10 @@ class JeriWorld:
 
     def get_valid_actions(self, use_object_tree=True, use_ctypes=True, use_parallel=True):
         if self.tw_games:
-            return self.in7.gen_commands_from_actions(self.gp.valid_actions)
+            return self._env.state['admissible_commands']
         return self._env.get_valid_actions(use_object_tree, use_ctypes, use_parallel)
     
-    def identify_interactive_objects(self, observation='', use_object_tree=False):
+    def _identify_interactive_objects(self, observation='', use_object_tree=False):
         """
         Identifies objects in the current location and inventory that are likely
         to be interactive.
@@ -329,11 +327,11 @@ class JeriWorld:
                 if obj[0] not in objs_set:
                     objs_set.add(obj[0])
             return objs_set
-        return self._env._identify_interactive_objects
+        return self._env._identify_interactive_objects(observation=observation, use_object_tree=use_object_tree)
 
-    def find_valid_actions(self):
-        diff2acts = {}
+    def find_valid_actions(self, possible_acts=None):
         if self.tw_games:
+            diff2acts = {}
             state = self.get_state()
             candidate_actions = self.get_valid_actions()
             for act in candidate_actions:
@@ -346,12 +344,17 @@ class JeriWorld:
                 else:
                     diff2acts[diff] = [act]
             self.set_state(state)
+            return diff2acts
         else:
-            interactive_objs  = self._identify_interactive_objects(use_object_tree=use_object_tree)
-            best_obj_names = self._score_object_names(interactive_objs)
-            candidate_actions = self.act_gen.generate_actions(best_obj_names)
-            diff2acts = self._filter_candidate_actions(candidate_actions)
-        return diff2acts
+            admissible = []
+            candidate_acts = self._env._filter_candidate_actions(possible_acts).values()
+            true_actions = self._env.get_valid_actions()
+            for temp_list in candidate_acts:
+                for template in temp_list:
+                    if template.action in true_actions:
+                        admissible.append(template)
+            return admissible
+
 
     def _score_object_names(self, interactive_objs):
         """ Attempts to choose a sensible name for an object, typically a noun. """
@@ -371,6 +374,12 @@ class JeriWorld:
             sorted_objs = sorted(objs, key=score_fn, reverse=True)
             best_names.append(sorted_objs[0][0])
         return best_names
+
+    def get_world_state_hash(self):
+        if self.tw_games:
+            return None
+        else:
+            return self._env.get_world_state_hash()
 
 class KGA2CEnv:
     '''
@@ -400,7 +409,8 @@ class KGA2CEnv:
 
     def create(self):
         ''' Create the Jericho environment and connect to redis. '''
-        self.env = JeriWorld(self.rom_path, self.seed)
+        infos = EnvInfos(admissible_commands=True, description=True)
+        self.env = JeriWorld(self.rom_path, self.seed, infos=infos)
         self.bindings = self.env.bindings
         self.act_gen = self.env.act_gen
         self.max_word_len = self.bindings['max_word_length']
@@ -423,7 +433,7 @@ class KGA2CEnv:
     def _build_graph_rep(self, action, ob_r):
         ''' Returns various graph-based representations of the current state. '''
         #objs = [o[0] for o in self.env._identify_interactive_objects(ob_r)]
-        objs = list(self.env.identify_interactive_objects(ob_r))
+        objs = list(self.env._identify_interactive_objects(ob_r))
         admissible_actions = self._get_admissible_actions(objs)
         admissible_actions_rep = [self.state_rep.get_action_rep_drqa(a.action) \
                                   for a in admissible_actions] \
