@@ -8,7 +8,9 @@ from textworld.core import EnvInfos
 GraphInfo = collections.namedtuple('GraphInfo', 'objs, ob_rep, act_rep, graph_state, graph_state_rep, admissible_actions, admissible_actions_rep')
 
 def load_vocab(env):
-    vocab = {i+2: str(v) for i, v in enumerate(env.get_dictionary())}
+    with open('/content/JW-KG-A2C/kga2c/coin_vocab.txt') as f:
+        dic = f.read().splitlines()
+    vocab = {i+2: str(v) for i, v in enumerate(dic)}
     vocab[0] = ' '
     vocab[1] = '<s>'
     vocab_rev = {v: i for i, v in vocab.items()}
