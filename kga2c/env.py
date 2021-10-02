@@ -8,7 +8,7 @@ from textworld.core import EnvInfos
 GraphInfo = collections.namedtuple('GraphInfo', 'objs, ob_rep, act_rep, graph_state, graph_state_rep, admissible_actions, admissible_actions_rep')
 
 def load_vocab(env):
-    with open('/content/JW-KG-A2C/kga2c/coin_vocab.txt') as f:
+    with open('/content/JW-KG-A2C/kga2c/coin_hard_vocab.txt') as f:
         dic = f.read().splitlines()
     vocab = {i+2: str(v) for i, v in enumerate(dic)}
     vocab[0] = ' '
@@ -148,10 +148,10 @@ def _load_bindings_from_tw(state, story_file, seed):
     bindings = {}
     g1 = [re.sub('{.*?}', 'OBJ', s) for s in state.command_templates]
     g = list(set([re.sub('go .*', 'go OBJ', s) for s in g1]))
-    g.remove('drop OBJ')
-    g.remove('examine OBJ')
+    '''g.remove('look')
     g.remove('inventory')
-    g.remove('look')
+    g.remove('examine OBJ')
+    g.remove('drop OBJ')'''
     bindings['grammar'] = ';'.join(g)
     bindings['max_word_length'] = len(max(state.verbs + state.entities, key=len))
     bindings['minimal_actions'] = '/'.join(state['extra.walkthrough'])
@@ -164,110 +164,160 @@ def _load_bindings_from_tw(state, story_file, seed):
 
 class JeriWorld:
     def __init__(self, story_file, seed=None, style='jericho', infos = None):
-        self._env = textworld.start(story_file, infos=infos)
-        state = self._env.reset()
-        self.tw_games = True
-        self._seed = seed
-        self.bindings = None
-        if state.command_templates is None:
-            self.tw_games = False
-            del self._env
-            self._env = jericho.FrotzEnv(story_file, seed)
-            self.bindings = self._env.bindings
-            self._world_changed = self._env._world_changed
-            self.act_gen = self._env.act_gen
+        self.jeri_style = style.lower() == 'jericho'
+        if self.jeri_style:
+            self._env = textworld.start(story_file, infos=infos)
+            state = self._env.reset()
+            self.tw_games = True
+            self._seed = seed
+            self.bindings = None
+            if state.command_templates is None:
+                self.tw_games = False
+                del self._env
+                self._env = jericho.FrotzEnv(story_file, seed)
+                self.bindings = self._env.bindings
+                self._world_changed = self._env._world_changed
+                self.act_gen = self._env.act_gen
+            else:
+                self.bindings = _load_bindings_from_tw(state, story_file, seed)
+                self._world_changed = self._env._jericho._world_changed
+                self.act_gen = TemplateActionGeneratorJeri(self.bindings)
+                self.seed(seed)
         else:
-            self.bindings = _load_bindings_from_tw(state, story_file, seed)
-            self._world_changed = self._env._jericho._world_changed
-            self.act_gen = TemplateActionGeneratorJeri(self.bindings)
-            self.seed(seed)
+            self._env = textworld.start(story_file, infos=infos)
 
     def __del__(self):
         del self._env
+ 
     
     def reset(self):
-        if self.tw_games:
-            state = self._env.reset()
-            raw = state['description']
-            return raw, {'moves':state.moves, 'score':state.score}
-        return self._env.reset()
+        if self.jeri_style:
+            if self.tw_games:
+                state = self._env.reset()
+                raw = state['description']
+                return raw, {'moves':state.moves, 'score':state.score}
+            return self._env.reset()
+        else:
+            return self._env.reset()
     
     def load(self, story_file, seed=None):
-        self._env.load(self, story_file, seed=None)
+        if self.jeri_style:
+            if self.tw_games:
+                self._env.load(story_file)
+            else:
+                self._env.load(story_file, seed)
+        else:
+            self._env.load(story_file)
 
     def step(self, action):
-        if self.tw_games:
-            old_score = self._env.state.score
-            next_state = self._env.step(action)[0]
-            s_action = re.sub(r'\s+', ' ', action.strip())
-            score = self._env.state.score
-            reward = score - old_score
-            self._world_changed = self._env._jericho._world_changed
-            return next_state.description, reward, (next_state.lost or next_state.won),\
-              {'moves':next_state.moves, 'score':next_state.score}
+        if self.jeri_style:
+            if self.tw_games:
+                next_state = self._env.step(action)[0]
+                self._world_changed = self._env._jericho._world_changed
+                return next_state.description, next_state['intermediate_reward'], (next_state.lost or next_state.won),\
+                  {'moves':next_state.moves, 'score':next_state.score}
+            else:
+                self._world_changed = self._env._world_changed
+            return self._env.step(action)
         else:
-            self._world_changed = self._env._world_changed
-        return self._env.step(action)
+            return self._env.step(action)
 
     def bindings(self):
-        return self.bindings
+        if self.jeri_style:
+            return self.bindings
+        else:
+            return None
 
     def _emulator_halted(self):
-        if self.tw_games:
-            return self._env._env._emulator_halted()
-        return self._env._emulator_halted()
+        if self.jeri_style:
+            if self.tw_games:
+                return self._env._env._emulator_halted()
+            return self._env._emulator_halted()
+        else:
+            return None
 
     def game_over(self):
-        if self.tw_games:
-            self._env.state['lost']
-        return self._env.game_over()
+        if self.jeri_style:
+            if self.tw_games:
+                self._env.state['lost']
+            return self._env.game_over()
+        else:
+            return None
 
     def victory(self):
-        if self.tw_games:
-            self._env.state['won']
-        return self._env.victory()
+        if self.jeri_style:
+            if self.tw_games:
+                self._env.state['won']
+            return self._env.victory()
+        else:
+            return None
 
     def seed(self, seed=None):
-        self._seed = seed
-        return self._env.seed(seed)
+        if self.jeri_style:
+            self._seed = seed
+            return self._env.seed(seed)
+        else:
+            return None
     
     def close(self):
-        self._env.close()
+        if self.jeri_style:
+            self._env.close()
+        else:
+            pass
 
     def copy(self):
         return self._env.copy()
 
     def get_walkthrough(self):
-        if self.tw_games:
-            return self._env.state['extra.walkthrough']
-        return self._env.get_walkthrough()
+        if self.jeri_style:
+            if self.tw_games:
+                return self._env.state['extra.walkthrough']
+            return self._env.get_walkthrough()
+        else:
+            return None
 
     def get_score(self):
-        if self.tw_games:
-            return self._env.state['score']
-        return self._env.get_score()
+        if self.jeri_style:
+            if self.tw_games:
+                return self._env.state['score']
+            return self._env.get_score()
+        else:
+            return None
 
     def get_dictionary(self):
-        if self.tw_games:
+        if self.jeri_style:
+            if self.tw_games:
+                state = self._env.state
+                return state.entities + state.verbs
+            return self._env.get_dictionary()
+        else:
             state = self._env.state
             return state.entities + state.verbs
-        return self._env.get_dictionary()
 
     def get_state(self):
-        if self.tw_games:
-            return self._env._jericho.get_state()
-        return self._env.get_state
+        if self.jeri_style:
+            if self.tw_games:
+                return self._env._jericho.get_state()
+            return self._env.get_state
+        else:
+            return None
     
     def set_state(self, state):
-        if self.tw_games:
-            self._env._jericho.set_state(state)
+        if self.jeri_style:
+            if self.tw_games:
+                self._env._jericho.set_state(state)
+            else:
+                self._env.get_state
         else:
-            self._env.get_state
+            pass
 
     def get_valid_actions(self, use_object_tree=True, use_ctypes=True, use_parallel=True):
-        if self.tw_games:
-            return self._env.state['admissible_commands']
-        return self._env.get_valid_actions(use_object_tree, use_ctypes, use_parallel)
+        if self.jeri_style:
+            if self.tw_games:
+                return self._env.state['admissible_commands']
+            return self._env.get_valid_actions(use_object_tree, use_ctypes, use_parallel)
+        else:
+            pass
     
     def _identify_interactive_objects(self, observation='', use_object_tree=False):
         """
@@ -289,99 +339,111 @@ class JeriWorld:
         Zork1's brass latern which may be referred to either as *brass* or *lantern*.\
         This method groups all such aliases together into a list for each object.
         """
-        if self.tw_games:
-            objs = set()
-            state = self.get_state()
+        if self.jeri_style:
+            if self.tw_games:
+                objs = set()
+                state = self.get_state()
 
-            if observation:
-                # Extract objects from observation
-                obs_objs = extract_objs(observation)
-                obs_objs = [o + ('OBS',) for o in obs_objs]
-                objs = objs.union(obs_objs)
+                if observation:
+                    # Extract objects from observation
+                    obs_objs = extract_objs(observation)
+                    obs_objs = [o + ('OBS',) for o in obs_objs]
+                    objs = objs.union(obs_objs)
 
-            # Extract objects from location description
-            self.set_state(state)
-            look = clean(self.step('look')[0])
-            look_objs = extract_objs(look)
-            look_objs = [o + ('LOC',) for o in look_objs]
-            objs = objs.union(look_objs)
+                # Extract objects from location description
+                self.set_state(state)
+                look = clean(self.step('look')[0])
+                look_objs = extract_objs(look)
+                look_objs = [o + ('LOC',) for o in look_objs]
+                objs = objs.union(look_objs)
 
-            # Extract objects from inventory description
-            self.set_state(state)
-            inv = clean(self.step('inventory')[0])
-            inv_objs = extract_objs(inv)
-            inv_objs = [o + ('INV',) for o in inv_objs]
-            objs = objs.union(inv_objs)
-            self.set_state(state)
+                # Extract objects from inventory description
+                self.set_state(state)
+                inv = clean(self.step('inventory')[0])
+                inv_objs = extract_objs(inv)
+                inv_objs = [o + ('INV',) for o in inv_objs]
+                objs = objs.union(inv_objs)
+                self.set_state(state)
 
-            # Filter out the objects that aren't in the dictionary
-            dict_words = [w for w in self.get_dictionary()]
-            max_word_length = max([len(w) for w in dict_words])
-            to_remove = set()
-            for obj in objs:
-                if len(obj[0].split()) > 1:
-                    continue
-                if obj[0][:max_word_length] not in dict_words:
-                    to_remove.add(obj)
-            objs.difference_update(to_remove)
-            objs_set = set()
-            for obj in objs:
-                if obj[0] not in objs_set:
-                    objs_set.add(obj[0])
-            return objs_set
-        return self._env._identify_interactive_objects(observation=observation, use_object_tree=use_object_tree)
+                # Filter out the objects that aren't in the dictionary
+                dict_words = [w for w in self.get_dictionary()]
+                max_word_length = max([len(w) for w in dict_words])
+                to_remove = set()
+                for obj in objs:
+                    if len(obj[0].split()) > 1:
+                        continue
+                    if obj[0][:max_word_length] not in dict_words:
+                        to_remove.add(obj)
+                objs.difference_update(to_remove)
+                objs_set = set()
+                for obj in objs:
+                    if obj[0] not in objs_set:
+                        objs_set.add(obj[0])
+                return objs_set
+            return self._env._identify_interactive_objects(observation=observation, use_object_tree=use_object_tree)
+        else:
+            return None
 
     def find_valid_actions(self, possible_acts=None):
-        if self.tw_games:
-            diff2acts = {}
-            state = self.get_state()
-            candidate_actions = self.get_valid_actions()
-            for act in candidate_actions:
+        if self.jeri_style:
+            if self.tw_games:
+                diff2acts = {}
+                state = self.get_state()
+                candidate_actions = self.get_valid_actions()
+                for act in candidate_actions:
+                    self.set_state(state)
+                    self.step(act)
+                    diff = self._env._jericho._get_world_diff()
+                    if diff in diff2acts:
+                        if act not in diff2acts[diff]:
+                            diff2acts[diff].append(act)
+                    else:
+                        diff2acts[diff] = [act]
                 self.set_state(state)
-                self.step(act)
-                diff = self._env._jericho._get_world_diff()
-                if diff in diff2acts:
-                    if act not in diff2acts[diff]:
-                        diff2acts[diff].append(act)
-                else:
-                    diff2acts[diff] = [act]
-            self.set_state(state)
-            return diff2acts
+                return diff2acts
+            else:
+                admissible = []
+                candidate_acts = self._env._filter_candidate_actions(possible_acts).values()
+                true_actions = self._env.get_valid_actions()
+                for temp_list in candidate_acts:
+                    for template in temp_list:
+                        if template.action in true_actions:
+                            admissible.append(template)
+                return admissible
         else:
-            admissible = []
-            candidate_acts = self._env._filter_candidate_actions(possible_acts).values()
-            true_actions = self._env.get_valid_actions()
-            for temp_list in candidate_acts:
-                for template in temp_list:
-                    if template.action in true_actions:
-                        admissible.append(template)
-            return admissible
+            return None
 
 
     def _score_object_names(self, interactive_objs):
         """ Attempts to choose a sensible name for an object, typically a noun. """
-        def score_fn(obj):
-            score = -.01 * len(obj[0])
-            if obj[1] == 'NOUN':
-                score += 1
-            if obj[1] == 'PROPN':
-                score += .5
-            if obj[1] == 'ADJ':
-                score += 0
-            if obj[2] == 'OBJTREE':
-                score += .1
-            return score
-        best_names = []
-        for desc, objs in interactive_objs.items():
-            sorted_objs = sorted(objs, key=score_fn, reverse=True)
-            best_names.append(sorted_objs[0][0])
-        return best_names
+        if self.jeri_style:
+            def score_fn(obj):
+                score = -.01 * len(obj[0])
+                if obj[1] == 'NOUN':
+                    score += 1
+                if obj[1] == 'PROPN':
+                    score += .5
+                if obj[1] == 'ADJ':
+                    score += 0
+                if obj[2] == 'OBJTREE':
+                    score += .1
+                return score
+            best_names = []
+            for desc, objs in interactive_objs.items():
+                sorted_objs = sorted(objs, key=score_fn, reverse=True)
+                best_names.append(sorted_objs[0][0])
+            return best_names
+        else:
+            return None
 
     def get_world_state_hash(self):
-        if self.tw_games:
-            return None
+        if self.jeri_style:
+            if self.tw_games:
+                return None
+            else:
+                return self._env.get_world_state_hash()
         else:
-            return self._env.get_world_state_hash()
+            return None
 
 class KGA2CEnv:
     '''
@@ -411,7 +473,7 @@ class KGA2CEnv:
 
     def create(self):
         ''' Create the Jericho environment and connect to redis. '''
-        infos = EnvInfos(admissible_commands=True, description=True)
+        infos = EnvInfos(admissible_commands=True, description=True, intermediate_reward=True)
         self.env = JeriWorld(self.rom_path, self.seed, infos=infos)
         self.bindings = self.env.bindings
         self.act_gen = self.env.act_gen
